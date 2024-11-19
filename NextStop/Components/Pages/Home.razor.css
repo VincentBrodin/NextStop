@@ -1,0 +1,46 @@
+﻿.search-container, .departures-container {
+    height: 100%;
+    top: 50%;
+    left: 50%;
+    transform: translateX(-50%);
+    position: absolute;
+    transition: 250ms ease-in;
+}
+
+.search-container:has(.search-input:focus), .search-container:has(.search-button:focus), .search-container:has(.search-button:hover) {
+    top: 5%;
+}
+
+.departures-container {
+    top: 5%;
+}
+
+.search-button {
+    border: none;
+    background: none;
+    transition: 50ms;
+}
+
+.search-button:hover {
+    color: grey !important;
+}
+
+.search-input {
+    height: 3rem;
+}
+
+.fade-in {
+    animation-name: fade-in;
+    animation-duration: 500ms;
+    animation-fill-mode: forwards;
+    opacity: 0;
+}
+
+@keyframes fade-in {
+    0% {
+        opacity: 0;
+    }
+    100% {
+        opacity: 1;
+    }
+}

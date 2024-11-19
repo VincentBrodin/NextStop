@@ -1,0 +1,243 @@
+﻿@page "/"
+@using System.Collections.Concurrent
+@using System.Text.Json
+@using System.Timers;
+
+@rendermode InteractiveServer
+@implements IDisposable
+
+<PageTitle>Next Stop</PageTitle>
+
+<div class="w-100 h-100">
+    <div class="container-sm @_mode">
+        <input id="search-input" type="text" class="form-control w-100 shadow fade-in search-input"
+               @oninput="@OnInput"
+               @onfocus="@SearchFocus" @onblur="() => _searching = false"
+               placeholder="Were should we go?" autocomplete="off">
+        @if (_departuresFromSite != null) {
+            <div class="container-fluid d-flex flex-column mt-3 py-1 ">
+                @foreach (Departure departure in _departuresFromSite.Departures) {
+                    <div class="card  my-1 fade-in">
+                        <div class="card-header">
+                            <h5 class="card-title">
+                                <span class="text-muted">@GetIcon(departure)</span>
+                                @_chosenSite!.Name → @departure.Destination
+                                <span class="text-muted fw-normal" style="font-size: 1rem;">@departure.Display</span>
+                            </h5>
+                        </div>
+                        <div class="card-body">
+
+                            <p class="card-subtitle @GetDelayColor(departure)">@GetPrettyDelay(departure)</p>
+                            <p class="card-text text-muted">@departure.Line.TransportMode</p>
+                            <p class="card-text text-muted">@departure.Direction</p>
+                        </div>
+                        @if (departure.State != null) {
+                            <div class="card-footer">
+                                <p class="card-text">@departure.State</p>
+                            </div>
+                        }
+
+                    </div>
+                }
+            </div>
+        }
+        @if ((_searching || _overSites) && _found?.Count != 0) {
+            <div class="container-fluid d-flex flex-column border rounded mt-3 shadow py-1 fade-in"
+                 @onmouseenter="() => _overSites = true" @onmouseleave="() => _overSites = false">
+                @for (int i = 0; i < Math.Min(_found!.Count, 10); i++) {
+                    int currentI = i;
+                    <button class="text-start search-button my-1" @onclick="() => ChooseSite(currentI)">
+                        @GetName(_found[i])
+                        @if (_found[i].Note != null) {
+                            <span class="text-muted ms-1">@_found[i].Note</span>
+                        }
+                    </button>
+                }
+            </div>
+        }
+        @if (_loading) {
+            <div class="overlay">
+                <Loader/>
+            </div>
+        }
+    </div>
+</div>
+
+@code {
+    private bool _loading = true;
+    private bool _searching;
+    private bool _overSites;
+    private string _search = "";
+
+
+    private string _mode = "search-container";
+
+    private List<Site>? _sites = [];
+    private List<Site>? _found = [];
+
+    private DeparturesFromSite? _departuresFromSite;
+    private Site? _chosenSite;
+    private Timer? _timer;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender) {
+        if (!firstRender) {
+            return;
+        }
+
+        try {
+            using HttpClient client = new();
+            string body = await client.Get("https://transport.integration.sl.se/v1/sites?expand=true");
+            _sites = JsonSerializer.Deserialize<List<Site>>(body);
+            if (_sites != null) {
+                _loading = false;
+            }
+
+        }
+        catch (Exception exception) {
+            Console.WriteLine($"Error trying to get sites: {exception.Message}");
+        }
+
+        StateHasChanged();
+    }
+
+
+
+    private void OnInput(ChangeEventArgs eventArgs) {
+        _search = (string)eventArgs.Value!;
+        HideDepartures();
+
+        ConcurrentQueue<Tuple<Site, double>> results = [];
+
+        Parallel.ForEach(_sites!, site => {
+            double score = 0;
+            int count = 0;
+            score += Fuzzy.WeightedLevenshteinScore(_search, site.Name);
+            count++;
+
+            foreach (string alias in site.Alias) {
+                score += Fuzzy.WeightedLevenshteinScore(_search, alias);
+                count++;
+            }
+
+            score /= count;
+
+            if (score < 0.5) {
+                return;
+            }
+
+            results.Enqueue(new Tuple<Site, double>(site, score));
+        });
+
+        _found = results.OrderByDescending(r => r.Item2).Select(r => r.Item1).ToList();
+    }
+
+    private async Task ChooseSite(int i) {
+        if (_found == null) return;
+        _loading = true;
+        _mode = "departures-container";
+        _chosenSite = _found[i];
+        _departuresFromSite = await GetDeparturesFromSite(_chosenSite.Id);
+        if (_departuresFromSite == null) return;
+
+        _timer = new Timer(10000); // 10s interval
+        _timer.Elapsed += TimerOnElapsed;
+        _timer.AutoReset = true;
+        _timer.Enabled = true;
+        Console.WriteLine("Timer started");
+
+        _loading = false;
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async void TimerOnElapsed(object? sender, ElapsedEventArgs e) {
+        try {
+            Console.WriteLine("Timer tick");
+            if (_chosenSite == null) {
+                return;
+            }
+
+            _departuresFromSite = await GetDeparturesFromSite(_chosenSite.Id);
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (Exception exception) {
+            Console.WriteLine(exception.Message);
+        }
+    }
+
+    private static async Task<DeparturesFromSite?> GetDeparturesFromSite(long id) {
+        try {
+            using HttpClient client = new();
+            string body = await client.Get($"https://transport.integration.sl.se/v1/sites/{id}/departures");
+            return JsonSerializer.Deserialize<DeparturesFromSite>(body);
+        }
+        catch (Exception exception) {
+            Console.WriteLine($"Error while trying to get departures from site: {exception.Message}");
+            return null;
+        }
+    }
+
+    private static string GetName(Site site) {
+        string name = $"{site.Name}";
+
+        if (site.Alias.Count == 0) {
+            return name;
+        }
+
+        name += $" (";
+        name = site.Alias.Aggregate(name, (current, alias) => current + $"{alias}, ");
+        name = name.Remove(name.Length - 2, 2);
+        name += ")";
+
+        return name;
+    }
+
+    private int GetDelayInMinutes(Departure departure) {
+        if (departure.Scheduled == null || departure.Expected == null) {
+            return 0;
+        }
+
+        TimeSpan delay = departure.Expected.Value.Subtract(departure.Scheduled.Value);
+
+        return (int)Math.Round(delay.TotalMinutes);
+    }
+
+    private string GetPrettyDelay(Departure departure) {
+        int delay = GetDelayInMinutes(departure);
+        return delay == 0 ? "On time" : $"{delay}m late";
+    }
+
+    private string GetDelayColor(Departure departure) {
+        int delay = GetDelayInMinutes(departure);
+        return delay switch {
+            0 => "text-success",
+            < 5 => "text-warning",
+            _ => "text-danger"
+        };
+    }
+
+    private string GetIcon(Departure departure) {
+        return departure.Line.TransportMode switch {
+            "BUS" => "B",
+            "TRAIN" => "T",
+            "METRO" => "M",
+            _ => " "
+        };
+    }
+
+    private void HideDepartures() {
+        _departuresFromSite = null;
+        _mode = "search-container";
+        _timer?.Dispose();
+        _timer = null;
+    }
+
+    private void SearchFocus() {
+        _searching = true;
+        HideDepartures();
+    }
+
+    public void Dispose() {
+        _timer?.Dispose();
+    }
+
+}

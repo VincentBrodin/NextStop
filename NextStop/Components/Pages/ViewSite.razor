@@ -1,0 +1,102 @@
+﻿@page "/{Id:long?}"
+@using System.Text.Json
+@using System.Timers;
+
+@implements IDisposable
+
+@rendermode InteractiveServer
+
+<PageTitle>Site</PageTitle>
+
+<div class="w-100 h-100">
+    @if (_loading || _departures == null) {
+    }
+    else {
+        @foreach (Departure departure in _departures.Departures) {
+            <div class="card p-3 m-2">
+                <h1>->@departure.Destination</h1>
+                <p>@departure.Display</p>
+                <p>@departure.Line.TransportMode</p>
+                @*@if (GetDelay(departure) != "None") {
+                    <p>Delay: @GetDelay(departure)</p>
+                }*@
+                @if (departure.State != null) {
+                    <p class="text-danger">@departure.State</p>
+                }
+            </div>
+        }
+    }
+</div>
+
+@code {
+    private bool _loading = true;
+    [Parameter] public long? Id { get; set; }
+    private DeparturesFromSite? _departures;
+    private Timer? _timer;
+
+
+    protected override async Task OnAfterRenderAsync(bool firstRender) {
+        if (!firstRender) {
+            return;
+        }
+
+        try {
+            using HttpClient client = new();
+            string body = await client.Get($"https://transport.integration.sl.se/v1/sites/{Id}/departures");
+            _departures = JsonSerializer.Deserialize<DeparturesFromSite>(body);
+            _loading = false;
+            _timer = new Timer(5000); // 10 second interval
+            _timer.Elapsed += TimerOnElapsed;
+            _timer.AutoReset = true;
+            _timer.Enabled = true;
+        }
+        catch (Exception exception) {
+            Console.WriteLine(exception.Message);
+            // ignored
+        }
+
+        StateHasChanged();
+    }
+
+    private async void TimerOnElapsed(object? sender, ElapsedEventArgs e) {
+        try {
+            using HttpClient client = new();
+            string body = await client.Get($"https://transport.integration.sl.se/v1/sites/{Id}/departures");
+            _departures = JsonSerializer.Deserialize<DeparturesFromSite>(body);
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (Exception exception) {
+            Console.WriteLine(exception.Message);
+            // ignored
+        }
+    }
+
+    private int GetDelayInMinutes(Departure departure) {
+        if (departure.Scheduled == null || departure.Expected == null) {
+            return 0;
+        }
+
+        TimeSpan delay = departure.Expected.Value.Subtract(departure.Scheduled.Value);
+        
+        return (int)Math.Round(delay.TotalMinutes);
+    }
+
+    private string GetPrettyDelay(Departure departure) {
+        int delay = GetDelayInMinutes(departure);
+        return delay == 0 ? "On Time" : $"{delay}m";
+    }
+
+    private string GetDelayColor(Departure departure) {
+        int delay = GetDelayInMinutes(departure);
+        return delay switch {
+            0 => "text-success",
+            < 5 => "text-warning",
+            _ => "text-danger"
+        };
+    }
+
+    public void Dispose() {
+        _timer?.Dispose();
+    }
+
+}
